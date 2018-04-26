@@ -7,6 +7,7 @@
 \usepackage{newunicodechar}
 \usepackage{mathtools}
 \usepackage{bm}
+\usepackage{multicol}
 
 \DeclareUnicodeCharacter{2212}{-}
 
@@ -24,7 +25,7 @@
 
 \title{Subcubic Parallelized Matrix Inversion \\
 	\large Through Strassen's Algorithm}
-\author{Andres Valdes, Alejandro Perez, Dewey Morris}
+\author{Andres Valdes, Alejandro Perez, Dewey Mowris, Andy Herrera}
 \date{April, 2018}
 
 \begin{document}
@@ -56,7 +57,7 @@
         e & f & g & h
     \end{bmatrix*}\]
 
-    This is a what is referred to as a \(2\times{4}\) matrix, as it 
+    This is what is referred to as a \(2\times{4}\) matrix, as it 
     has two rows and four columns. In general, we speak about matrices as 
     \(m\times{n}\), where \(m\) is the number of rows and \(n\) is the number 
     of columns. The types of matrices we will deal with are called "square" 
@@ -95,7 +96,7 @@
     \bigskip
 
     Thankfully, we do have a way of reducing the problem for the calculation of 
-    a matrix inverse via an analytic inversion formula known as blockwise inversion. 
+    a matrix inverse via an analytic inversion formula known as blockwise inversion\cite{zhang}. 
     In blockwise inversion, we split our matrix \(M\) into matrix blocks, such that
     \[M^{-1} = \begin{bmatrix*}
         A & B \\
@@ -108,14 +109,14 @@
     
     The advantage to this divide-and-conquer algorithm is that it can be shown 
     that the computational complexity of the entire inversion is the same as the
-    computational complexity of the multiplication algorithm used. This is where 
+    computational complexity of the multiplication algorithm used\cite{algo}. This is where 
     Strassen's algorithm, with a complexity of \(O(n^{log_27})\), comes into play.
 
     \bigskip
 
     Strassen describes an algorithm to multiply two matrices by splitting
     each into four matrix blocks of equal dimensions and performing seven multiplications
-    between those blocks as opposed to eight.
+    between those blocks as opposed to eight\cite{strassen}.
     \[A = \begin{bmatrix*}
         A_{11} & A_{12} \\
         A_{21} & A_{22}
@@ -150,5 +151,188 @@
     \end{align*}
     And thus, we've achieved matrix multiplication in subcubic time,
     and by extension, we can achieve matrix inversion in subcubic time.
+
+    \section{Previous Works}
+
+    There exist many algorithms for inverting matrices in 
+    cubic time via Gaussian Elimination in parallel, similar to the one implemented in many of the popular linear 
+    algebra packages like BLAS and LAPACK, and also the parallelized implementations of it.
+
+    There are also parallelized implementations of Strassen's algorithms in BLAS and elsewhere, but their implementation 
+    does not strictly tie in with the matrix inversion problem addressed in this article. The topic is particularly sparse 
+    when looking towards parallelized inversion algorithms in Go, where parallelized Strassen algorithms are 
+    scarse to begin with.
+    
+    This article aims to implement an algorithm that, while not new, hasn't been parallelized for 
+    the application of inverting matrices, especially not in Go.
+
+    \pagebreak
+
+    \section{Process}
+
+    Now, in order to implement the algorithm described above, we'll be using Go, Google's
+    language written particularly for concurrency using a wonderful structure called a "goroutine."
+
+    Essentially, our algorithm can be broken up into two algorithms, both of which have aspects that can be 
+    parallelized. First and foremost, we need to split our matrix sub-blocks. We then perform 
+    multiplications across those sub-blocks using Strassen's algorithm in order to get the seven intermediate matrices, 
+    and we do so in parallel. Of course, the intermediate scalar multiplications, additions between matrices, and copying of 
+    matrices are parallelized trivially in and of themselves.
+
+    The code on the following page implements the mathematical algorithm described below:
+    \begin{align*}
+        M_1 &\coloneqq (A_{11} + A_{22})(B_{11} + B_{22}) \\
+        M_2 &\coloneqq (A_{21} + A_{22})B_{11} \\
+        M_3 &\coloneqq A_{11}(B_{12} - B_{22}) \\
+        M_4 &\coloneqq A_{22}(B_{21} - B_{11}) \\
+        M_5 &\coloneqq (A_{11} + A_{12})B_{22} \\
+        M_6 &\coloneqq (A_{21} - A_{11})(B_{11} + B_{12}) \\
+        M_7 &\coloneqq (A_{12} - A_{22})(B_{21} + B_{22})
+    \end{align*}
+    \pagebreak
+    \begin{verbatim}
+        wg.Add(7)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m1, Mult(Add(a11, a22), Add(b11, b22)))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m2, Mult(Add(a21, a22), b11))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m3, Mult(a11, Add(b12, Scale(-1, b22))))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m4, Mult(a22, Add(b21, Scale(-1, b11))))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m5, Mult(Add(a11, a12), b22))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m6, Mult(Add(a21, Scale(-1, a11)), Add(b11, b12)))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.copy(m7, Mult(Add(a12, Scale(-1, a22)), Add(b21, b22)))
+        }(&wg)
+        wg.Wait()
+    \end{verbatim}
+
+    \textit{You may notice the use of "WaitGroup", these are essentially pools of 
+    goroutines that have yet to finish, the main thread will be halted until 
+    these goroutines finish.}
+
+    \pagebreak
+
+    After we've acquired these matrices, we can find compose our result matrix, \(C\), 
+    in the following manner: 
+    \begin{align*}
+        C_{11} &= M_1 + M_4 - M_5 + M_7 \\
+        C_{12} &= M_3 + M_5 \\
+        C_{21} &= M_2 + M_4 \\
+        C_{22} &= M_1 - M_2 + M_3 + M_6
+    \end{align*}
+    Via the following Go implementation:
+    \begin{verbatim}
+        wg.Add(4)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.Copy(c11, Add(Add(Add(m1, m4), Scale(-1, m5)), m7))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.Copy(c12, Add(m3, m5))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.Copy(c21, Add(m2, m4))
+        }(&wg)
+        go func(wg *sync.WaitGroup) {
+            defer wg.Done()
+            utils.Copy(c22, Add(Add(Add(m1, Scale(-1, m2)), m3), m6))
+        }(&wg)
+        wg.Wait()
+    \end{verbatim}
+
+    Strassen's multiplication, in our implementation, recurses down to a base case of a trivial \(1\times{1}\) 
+    multiplication.
+
+    This is done for every step in our blockwise inversion involving multiplication,
+    the implementation of which is far too lengthy and complex to include in this article 
+    and would be better understood within the context of the entire package, found on the GitHub repository.\footnote{Repository: https://github.com/SubcubicInversion/implementation}
+
+    Once the algorithm has recursed down to the base case, the \(3\times{3}\) case, the function calls close, 
+    fully inverting the matrix.
+
+    \section{Results}
+
+    The following results compare out runtime against that of BLAS, the low-level package
+    that handles NumPy's matrix inversion.
+
+    \begin{center}
+
+    
+        \begin{tabular}{|c|l|l|}
+    
+            \hline
+            Size & Strassen & BLAS  \\
+            \hline\hline
+            \(2\times2\) & 44.55ns & 367.89ns \\
+            \hline
+            \(4\times4\) & 648.49ns & 503.06ns \\
+            \hline
+            \(8\times8\) & 2.41ms & 1.05ms   \\
+            \hline
+            \(512\times512\) & 2min, 2s & 12.49ms \\
+            \hline
+        \end{tabular}
+    
+    \end{center}
+
+    Clearly, BLAS' matrix inversion implementation, despite its \(O(n^3)\) time complexity, is far faster for matrices of reasonable sizes.
+    The reason for this is that the assembly-level implementation of BLAS uses cache tricks to significantly reduce the time required to 
+    compute the inverse.
+
+    This advantage of caching over lesser complexity does dwindle as \(n\) approaches infinity, however; but the matrices of that magnitude are far 
+    too large for our tests to terminate within a reasonable amount of time.
+
+    Another reason that our algorithm may take longer to execute may be the fact that Go is a garbage-collected language, and through recursive calls, many 
+    intermediary structures are created and then simply unreferenced, forcing Go to garbage-collect a large host of memory.
+
+    \pagebreak
+
+    \section{Conclusions}
+
+    While for our tests, the algorithm developed to invert a matrix fell short of the algorithms used commonly 
+    as implemented by BLAS and LAPACK, it was the first parallelized algorithm to invert a matrix via Strassen's multiplication 
+    implemented in Go. It is interesting to see how, despite Go's low-level nature and the parallelization of an algorithm of lesser 
+    complexity, it is still beaten out by clever caching tricks to avoid fully computing the inverse element by element.
+
+    This does not mean that we cannot improve on the algorithm, as it be helpful to continue to improve on the space-complexity of the problem and perhaps write the algorithm on a lower-level 
+    language, one that is not garbage-collected, like C or Assembly, as BLAS is written.
+
+    Perhaps in the future, we can run this algorithm on a computer fast enough to terminate within a passable amount of time for 
+    very large \(n\), so that we may see the aymptotic relationships between both algorithms.
+    
+    \begin{thebibliography}{9}
+        \bibitem{algo} 
+        T. H. Cormen, C. E. Leiserson, R. L. Rivest, C. Stein, 
+        \textit{Introduction to Algorithms}, 3rd ed., MIT Press, Cambridge, MA, 2009, §28.2.
+         
+        \bibitem{strassen} 
+        Strassen, Volker, 
+        \textit{Gaussian Elimination is not Optimal}, Numer. Math. 13, p. 354-356, 1969
+         
+        \bibitem{zhang} 
+        Zhang, F., & Zhang, F. (2005). 
+        \textit{The Schur Complement and Its Applications: Numerical Methods and Algorithms}. Boston, MA: Springer US.
+    \end{thebibliography}
+    
+
 
 \end{document}
